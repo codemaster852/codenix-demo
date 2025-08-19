@@ -53,9 +53,30 @@
         .chat-plan-buttons button {
             transition: background-color 0.2s ease-in-out;
         }
-        /* Style for the placeholder text in the light-theme editor */
         #code-editor::placeholder {
-            color: #a0aec0; /* A light gray color */
+            color: #a0aec0;
+        }
+        /* Autocomplete styles */
+        #autocomplete-box {
+            position: absolute;
+            border: 1px solid #4a5568;
+            background-color: #2d3748;
+            color: white;
+            border-radius: 4px;
+            z-index: 100;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+        .autocomplete-item {
+            padding: 4px 8px;
+            cursor: pointer;
+        }
+        .autocomplete-item:hover, .autocomplete-item.selected {
+            background-color: #4a5568;
+        }
+        .file-item.selected-file {
+            background-color: #007ACC !important;
+            color: white;
         }
     </style>
 </head>
@@ -101,13 +122,14 @@
             </div>
         </div>
 
-        <div class="editor-group flex-grow flex flex-col">
+        <div class="editor-group flex-grow flex flex-col relative">
             <header class="header h-12 flex-shrink-0 flex justify-between items-center px-4">
                 <h1 class="text-lg font-bold">Codenix Demo</h1>
                 <button id="publish-btn" class="bg-green-600 hover:bg-green-700 text-white font-bold text-sm py-1 px-3 rounded"><i class="fas fa-rocket mr-1"></i>Publish</button>
             </header>
             <div id="editor-tabs" class="flex bg-sidebar-bg flex-shrink-0"></div>
             <textarea id="code-editor" class="flex-grow bg-white text-black p-4 font-mono text-base" placeholder="Select a file to start coding..."></textarea>
+            <div id="autocomplete-box" style="display: none;"></div>
             <div id="status-bar" class="status-bar h-6 w-full flex-shrink-0 flex items-center justify-end px-4 text-xs">Ready</div>
         </div>
     </div>
@@ -132,6 +154,7 @@
                 const previewIframe = document.getElementById('preview-iframe');
                 const sidebarContainer = document.getElementById('sidebar-container');
                 const publishBtn = document.getElementById('publish-btn');
+                const autocompleteBox = document.getElementById('autocomplete-box');
 
                 let currentPlan = null;
                 let openFiles = {};
@@ -196,7 +219,8 @@
                         fileList.innerHTML = '';
                         files.forEach(file => {
                             const fileElement = document.createElement('div');
-                            fileElement.className = 'p-1 hover:bg-gray-700 cursor-pointer rounded text-sm flex items-center';
+                            fileElement.className = 'p-1 hover:bg-gray-700 cursor-pointer rounded text-sm flex items-center file-item';
+                            fileElement.dataset.filename = file.name;
                             fileElement.innerHTML = `${getFileIcon(file.name)}<span>${file.name}</span>`;
                             fileElement.onclick = () => openFile(file.name);
                             fileList.appendChild(fileElement);
@@ -256,6 +280,10 @@
                         tab.classList.toggle('text-white', isActive);
                         tab.classList.toggle('bg-editor-bg', isActive);
                         tab.classList.toggle('text-gray-400', !isActive);
+                    });
+                    // Highlight selected file in explorer
+                    document.querySelectorAll('.file-item').forEach(item => {
+                        item.classList.toggle('selected-file', item.dataset.filename === filename);
                     });
                     updatePreview();
                 }
@@ -371,8 +399,6 @@ For example, if the user wants a simple webpage, the todo list might be:
 Do not include any explanatory text before or after the JSON object.`;
                         const response = await puter.ai.chat(prompt);
                         
-                        // FIX: The logic has been updated to correctly handle truncated AI responses.
-                        // It now checks the `finish_reason` and displays a specific error message if the response was cut off.
                         if (response && response.finish_reason === 'length') {
                             const thinkingMessageContent = thinkingMessage.querySelector('.message-content');
                             if (thinkingMessageContent) {
@@ -466,6 +492,33 @@ Do not include any explanatory text before or after the JSON object.`;
                     appendChatMessage('ai', planHtml);
                 }
 
+                /**
+                 * NEW: Simulates a typing effect in a textarea.
+                 * @param {string} text The text to type.
+                 * @param {HTMLTextAreaElement} element The textarea element to type into.
+                 * @param {number} speed The delay between characters in milliseconds.
+                 */
+                function typeCode(text, element, speed = 10) {
+                    return new Promise(resolve => {
+                        let i = 0;
+                        element.value = '';
+                        element.disabled = true;
+                        
+                        function typing() {
+                            if (i < text.length) {
+                                element.value += text.charAt(i);
+                                i++;
+                                setTimeout(typing, speed);
+                            } else {
+                                element.disabled = false;
+                                element.dispatchEvent(new Event('input')); // Trigger input event for preview
+                                resolve();
+                            }
+                        }
+                        typing();
+                    });
+                }
+
                 async function executePlan() {
                     if (!currentPlan?.todo) return;
                     for (let i = 0; i < currentPlan.todo.length; i++) {
@@ -510,8 +563,10 @@ Do not include any explanatory text before or after the JSON object.`;
                                 } else {
                                     await openFile(filename);
                                 }
+                                
                                 if (currentFile === filename) {
-                                    codeEditor.value = finalCode;
+                                    // Use the new typing effect
+                                    await typeCode(finalCode, codeEditor);
                                 }
                             }
                             updatePreview();
@@ -554,6 +609,119 @@ Do not include any explanatory text before or after the JSON object.`;
                         appendChatMessage('system', `Publishing failed: ${error.message}`);
                     }
                 });
+
+                // --- NEW: Autocomplete Logic ---
+                const htmlSuggestions = ['<!DOCTYPE html>', '<html>', '<head>', '<title>', '<body>', '<h1>', '<h2>', '<p>', '<div>', '<span>', '<img>', '<a>', '<script>', '<style>', '<ul>', '<ol>', '<li>'];
+                const cssSuggestions = ['color', 'background-color', 'font-size', 'font-family', 'width', 'height', 'padding', 'margin', 'border', 'display', 'position'];
+                let currentSuggestions = [];
+                let selectedSuggestionIndex = -1;
+
+                function showAutocomplete(suggestions) {
+                    if (suggestions.length === 0) {
+                        hideAutocomplete();
+                        return;
+                    }
+                    autocompleteBox.innerHTML = '';
+                    suggestions.forEach((suggestion, index) => {
+                        const item = document.createElement('div');
+                        item.className = 'autocomplete-item';
+                        item.textContent = suggestion;
+                        item.addEventListener('click', () => {
+                            insertSuggestion(suggestion);
+                            hideAutocomplete();
+                        });
+                        autocompleteBox.appendChild(item);
+                    });
+                    
+                    const rect = codeEditor.getBoundingClientRect();
+                    const caretPos = getCaretCoordinates(codeEditor, codeEditor.selectionEnd);
+                    autocompleteBox.style.display = 'block';
+                    autocompleteBox.style.left = `${rect.left + caretPos.x}px`;
+                    autocompleteBox.style.top = `${rect.top + caretPos.y + 20}px`;
+                    selectedSuggestionIndex = -1;
+                }
+
+                function hideAutocomplete() {
+                    autocompleteBox.style.display = 'none';
+                }
+
+                function insertSuggestion(suggestion) {
+                    const text = codeEditor.value;
+                    const cursorPos = codeEditor.selectionStart;
+                    const textBefore = text.substring(0, cursorPos);
+                    const wordStart = textBefore.lastIndexOf('<') > textBefore.lastIndexOf(' ') ? textBefore.lastIndexOf('<') : textBefore.lastIndexOf(' ') + 1;
+                    
+                    const newText = text.substring(0, wordStart) + suggestion + text.substring(cursorPos);
+                    codeEditor.value = newText;
+                    codeEditor.focus();
+                    codeEditor.selectionStart = codeEditor.selectionEnd = wordStart + suggestion.length;
+                }
+
+                codeEditor.addEventListener('input', () => {
+                    const text = codeEditor.value;
+                    const cursorPos = codeEditor.selectionStart;
+                    const textBefore = text.substring(0, cursorPos);
+                    const currentWord = textBefore.split(/[\s<]/).pop();
+
+                    if (currentWord.length > 0) {
+                        const suggestions = (currentFile && currentFile.endsWith('.css') ? cssSuggestions : htmlSuggestions)
+                            .filter(s => s.startsWith(currentWord.toLowerCase()));
+                        currentSuggestions = suggestions;
+                        showAutocomplete(suggestions);
+                    } else {
+                        hideAutocomplete();
+                    }
+                });
+
+                codeEditor.addEventListener('keydown', (e) => {
+                    if (autocompleteBox.style.display === 'none') return;
+
+                    if (e.key === 'ArrowDown') {
+                        e.preventDefault();
+                        selectedSuggestionIndex = (selectedSuggestionIndex + 1) % currentSuggestions.length;
+                        updateSelectedSuggestion();
+                    } else if (e.key === 'ArrowUp') {
+                        e.preventDefault();
+                        selectedSuggestionIndex = (selectedSuggestionIndex - 1 + currentSuggestions.length) % currentSuggestions.length;
+                        updateSelectedSuggestion();
+                    } else if (e.key === 'Enter' && selectedSuggestionIndex > -1) {
+                        e.preventDefault();
+                        insertSuggestion(currentSuggestions[selectedSuggestionIndex]);
+                        hideAutocomplete();
+                    } else if (e.key === 'Escape') {
+                        hideAutocomplete();
+                    }
+                });
+
+                function updateSelectedSuggestion() {
+                    const items = autocompleteBox.querySelectorAll('.autocomplete-item');
+                    items.forEach((item, index) => {
+                        item.classList.toggle('selected', index === selectedSuggestionIndex);
+                    });
+                }
+
+                // Helper to get cursor position
+                function getCaretCoordinates(element, position) {
+                    const mirrorDiv = document.createElement('div');
+                    document.body.appendChild(mirrorDiv);
+                    const style = window.getComputedStyle(element);
+                    ['fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'letterSpacing', 'textTransform', 'wordSpacing', 'lineHeight', 'padding'].forEach(prop => {
+                        mirrorDiv.style[prop] = style[prop];
+                    });
+                    mirrorDiv.style.position = 'absolute';
+                    mirrorDiv.style.visibility = 'hidden';
+                    mirrorDiv.style.whiteSpace = 'pre-wrap';
+                    mirrorDiv.style.wordWrap = 'break-word';
+                    mirrorDiv.style.width = element.clientWidth + 'px';
+                    mirrorDiv.textContent = element.value.substring(0, position);
+                    const span = document.createElement('span');
+                    span.textContent = element.value.substring(position) || '.';
+                    mirrorDiv.appendChild(span);
+                    const coords = { x: span.offsetLeft, y: span.offsetTop };
+                    document.body.removeChild(mirrorDiv);
+                    return coords;
+                }
+
 
             } catch (e) {
                 console.error('A critical error occurred during initialization:', e);
